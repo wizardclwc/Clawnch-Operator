@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build outputs
+.next/
+out/
+
+# Local environment and secrets
+.env*
+!.env.local.example
+!bot/.env.copytrade.example
+
+# Runtime artifacts
+*.log
+*.pid
+bot/copytrade-state.json
+bot/.logserver.token
+bot/.logserver.querykey
+
+# Wallets / private key material
+.wallets/
+
+# Vercel local link/config
+.vercel/
+
+# OS noise
+.DS_Store
