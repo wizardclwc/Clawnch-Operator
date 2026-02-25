@@ -46,6 +46,16 @@ pm2 start bot/copytrade-base.js --name copytrade-base --time
 pm2 save
 ```
 
+## Per-token reporting
+
+The bot now tracks per-token performance in state:
+- total buy/sell count per token
+- open token quantity and open cost basis
+- total ETH spent / received per token
+- realized PnL in ETH (average-cost basis)
+
+Note: report quality improves from the moment this feature is enabled (older trades may not contain fill metrics).
+
 ## Built-in guardrails
 
 - `DRY_RUN=true` by default (safe mode, no on-chain tx)

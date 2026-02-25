@@ -82,7 +82,27 @@ type CopytradeState = {
     side?: "buy" | "sell";
     signalAmount?: string;
     sellTokenAmount?: string;
+    tokenFillRaw?: string;
+    ethSpentWei?: string;
+    ethReceivedWei?: string;
+    realizedPnlWei?: string;
   }>;
+  positions?: Record<
+    string,
+    {
+      token?: string;
+      boughtRaw?: string;
+      soldRaw?: string;
+      qtyOpenRaw?: string;
+      costOpenWei?: string;
+      totalBuyEthWei?: string;
+      totalSellEthWei?: string;
+      realizedPnlWei?: string;
+      tradesBuy?: number;
+      tradesSell?: number;
+      lastUpdateMs?: number;
+    }
+  >;
   lastRunAt?: string;
   lastScannedBlock?: number;
 };
@@ -136,6 +156,43 @@ export async function GET(req: Request) {
   const tradesDesc = [...trades].sort((a, b) => (b.tsMs || 0) - (a.tsMs || 0));
   const executed = tradesDesc.filter((t) => !t.dryRun && !!t.followerTx);
 
+  const toBI = (v: unknown) => {
+    try {
+      if (v === undefined || v === null || v === "") return 0n;
+      return BigInt(String(v));
+    } catch {
+      return 0n;
+    }
+  };
+
+  const positions = state.positions && typeof state.positions === "object" ? state.positions : {};
+  const tokenReport = Object.entries(positions)
+    .map(([token, p]) => {
+      const row = p || {};
+      return {
+        token,
+        boughtRaw: String(row.boughtRaw || "0"),
+        soldRaw: String(row.soldRaw || "0"),
+        qtyOpenRaw: String(row.qtyOpenRaw || "0"),
+        costOpenWei: String(row.costOpenWei || "0"),
+        totalBuyEthWei: String(row.totalBuyEthWei || "0"),
+        totalSellEthWei: String(row.totalSellEthWei || "0"),
+        realizedPnlWei: String(row.realizedPnlWei || "0"),
+        tradesBuy: Number(row.tradesBuy || 0),
+        tradesSell: Number(row.tradesSell || 0),
+        lastUpdateMs: Number(row.lastUpdateMs || 0),
+      };
+    })
+    .sort((a, b) => {
+      const av = toBI(a.realizedPnlWei);
+      const bv = toBI(b.realizedPnlWei);
+      if (bv > av) return 1;
+      if (bv < av) return -1;
+      return 0;
+    });
+
+  const totalRealizedPnlWei = tokenReport.reduce((acc, r) => acc + toBI(r.realizedPnlWei), 0n);
+
   return Response.json(
     {
       ok: true,
@@ -147,9 +204,11 @@ export async function GET(req: Request) {
       summary: {
         totalSignals: tradesDesc.length,
         totalExecuted: executed.length,
+        totalRealizedPnlWei: totalRealizedPnlWei.toString(),
         lastRunAt: state.lastRunAt || null,
         lastScannedBlock: state.lastScannedBlock ?? null,
       },
+      tokenReport,
       trades: tradesDesc.slice(0, 200),
       logTail,
       updatedAt: Date.now(),

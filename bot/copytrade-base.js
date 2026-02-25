@@ -115,25 +115,129 @@ function topicForAddress(addr) {
   return `0x${'0'.repeat(24)}${normalizeAddr(addr).slice(2)}`;
 }
 
+function parseBigIntLoose(v, fallback = 0n) {
+  try {
+    if (v === undefined || v === null || v === '') return fallback;
+    return BigInt(String(v));
+  } catch {
+    return fallback;
+  }
+}
+
+function emptyPosition(token) {
+  return {
+    token,
+    boughtRaw: 0n,
+    soldRaw: 0n,
+    qtyOpenRaw: 0n,
+    costOpenWei: 0n,
+    totalBuyEthWei: 0n,
+    totalSellEthWei: 0n,
+    realizedPnlWei: 0n,
+    tradesBuy: 0,
+    tradesSell: 0,
+    lastUpdateMs: 0,
+  };
+}
+
 function buildState(stateFile) {
   const raw = readJsonSafe(stateFile, null);
   const s = raw && typeof raw === 'object' ? raw : {};
+
+  const positionsRaw = s.positions && typeof s.positions === 'object' ? s.positions : {};
+  const positions = {};
+  for (const [token, p] of Object.entries(positionsRaw)) {
+    const pp = p && typeof p === 'object' ? p : {};
+    positions[token] = {
+      token,
+      boughtRaw: parseBigIntLoose(pp.boughtRaw, 0n),
+      soldRaw: parseBigIntLoose(pp.soldRaw, 0n),
+      qtyOpenRaw: parseBigIntLoose(pp.qtyOpenRaw, 0n),
+      costOpenWei: parseBigIntLoose(pp.costOpenWei, 0n),
+      totalBuyEthWei: parseBigIntLoose(pp.totalBuyEthWei, 0n),
+      totalSellEthWei: parseBigIntLoose(pp.totalSellEthWei, 0n),
+      realizedPnlWei: parseBigIntLoose(pp.realizedPnlWei, 0n),
+      tradesBuy: Number(pp.tradesBuy || 0),
+      tradesSell: Number(pp.tradesSell || 0),
+      lastUpdateMs: Number(pp.lastUpdateMs || 0),
+    };
+  }
+
   return {
     seen: Array.isArray(s.seen) ? s.seen : [],
     trades: Array.isArray(s.trades) ? s.trades : [],
+    positions,
     lastRunAt: s.lastRunAt || null,
     lastScannedBlock: typeof s.lastScannedBlock === 'number' ? s.lastScannedBlock : null,
   };
+}
+
+function serializePositions(positions) {
+  const out = {};
+  for (const [token, p] of Object.entries(positions || {})) {
+    out[token] = {
+      token,
+      boughtRaw: String(p.boughtRaw || 0n),
+      soldRaw: String(p.soldRaw || 0n),
+      qtyOpenRaw: String(p.qtyOpenRaw || 0n),
+      costOpenWei: String(p.costOpenWei || 0n),
+      totalBuyEthWei: String(p.totalBuyEthWei || 0n),
+      totalSellEthWei: String(p.totalSellEthWei || 0n),
+      realizedPnlWei: String(p.realizedPnlWei || 0n),
+      tradesBuy: Number(p.tradesBuy || 0),
+      tradesSell: Number(p.tradesSell || 0),
+      lastUpdateMs: Number(p.lastUpdateMs || 0),
+    };
+  }
+  return out;
 }
 
 function persistState(stateFile, state) {
   const trimmed = {
     seen: state.seen.slice(-20000),
     trades: state.trades.slice(-2000),
+    positions: serializePositions(state.positions),
     lastRunAt: nowIso(),
     lastScannedBlock: state.lastScannedBlock,
   };
   writeJsonSafe(stateFile, trimmed);
+}
+
+function ensurePosition(state, token) {
+  if (!state.positions[token]) state.positions[token] = emptyPosition(token);
+  return state.positions[token];
+}
+
+function applyBuyFill(state, token, tokenAmountRaw, ethSpentWei) {
+  const pos = ensurePosition(state, token);
+  pos.boughtRaw += tokenAmountRaw;
+  pos.qtyOpenRaw += tokenAmountRaw;
+  pos.costOpenWei += ethSpentWei;
+  pos.totalBuyEthWei += ethSpentWei;
+  pos.tradesBuy += 1;
+  pos.lastUpdateMs = Date.now();
+  return pos;
+}
+
+function applySellFill(state, token, tokenAmountRaw, ethReceivedWei) {
+  const pos = ensurePosition(state, token);
+
+  const reducibleQty = tokenAmountRaw > pos.qtyOpenRaw ? pos.qtyOpenRaw : tokenAmountRaw;
+  const costReducedWei = pos.qtyOpenRaw > 0n ? (pos.costOpenWei * reducibleQty) / pos.qtyOpenRaw : 0n;
+  const realizedPnlWei = ethReceivedWei - costReducedWei;
+
+  pos.soldRaw += tokenAmountRaw;
+  pos.totalSellEthWei += ethReceivedWei;
+  pos.realizedPnlWei += realizedPnlWei;
+  pos.tradesSell += 1;
+
+  pos.qtyOpenRaw -= reducibleQty;
+  pos.costOpenWei -= costReducedWei;
+  if (pos.qtyOpenRaw < 0n) pos.qtyOpenRaw = 0n;
+  if (pos.costOpenWei < 0n) pos.costOpenWei = 0n;
+  pos.lastUpdateMs = Date.now();
+
+  return { pos, realizedPnlWei, costReducedWei, reducibleQty };
 }
 
 function isTradeAllowedByRate(state, { maxTradesPerHour, cooldownSec }) {
@@ -411,6 +515,12 @@ async function run() {
                 }
 
                 if (DRY_RUN) {
+                  const estEthSpentWei = parseBigIntLoose(quote?.transaction?.value ?? sellAmountWei, parseBigIntLoose(sellAmountWei, 0n));
+                  const estTokenBoughtRaw = parseBigIntLoose(quote?.buyAmount, 0n);
+                  const estPos = ensurePosition(state, token);
+                  const estQtyOpen = estPos.qtyOpenRaw + estTokenBoughtRaw;
+                  const estCostOpen = estPos.costOpenWei + estEthSpentWei;
+
                   log('DRY_RUN mirror buy', {
                     token: lg.address,
                     sellEth: TRADE_ETH_AMOUNT,
@@ -427,12 +537,24 @@ async function run() {
                     watchedHash: tx.hash,
                     signalAmount: signalAmount.toString(),
                     quoteBuyAmount: quote?.buyAmount,
+                    estEthSpentWei: String(estEthSpentWei),
+                    estTokenFillRaw: String(estTokenBoughtRaw),
+                    estQtyOpenRaw: String(estQtyOpen),
+                    estCostOpenWei: String(estCostOpen),
                   });
                   persistState(STATE_FILE, state);
                   continue;
                 }
 
                 try {
+                  const tokenBefore = await publicClient.readContract({
+                    address: lg.address,
+                    abi: ERC20_ABI,
+                    functionName: 'balanceOf',
+                    args: [account.address],
+                  });
+                  const ethBefore = await publicClient.getBalance({ address: account.address });
+
                   const sent = await walletClient.sendTransaction({
                     account,
                     chain: base,
@@ -442,6 +564,27 @@ async function run() {
                   });
 
                   const rec = await publicClient.waitForTransactionReceipt({ hash: sent });
+                  const tokenAfter = await publicClient.readContract({
+                    address: lg.address,
+                    abi: ERC20_ABI,
+                    functionName: 'balanceOf',
+                    args: [account.address],
+                  });
+                  const ethAfter = await publicClient.getBalance({ address: account.address });
+
+                  const gasPrice = parseBigIntLoose(rec.effectiveGasPrice, 0n);
+                  const gasCostWei = rec.gasUsed ? rec.gasUsed * gasPrice : 0n;
+
+                  let ethSpentWei = parseBigIntLoose(txValue, 0n);
+                  if (ethBefore > ethAfter + gasCostWei) {
+                    ethSpentWei = ethBefore - ethAfter - gasCostWei;
+                  }
+
+                  let tokenFillRaw = 0n;
+                  if (tokenAfter > tokenBefore) tokenFillRaw = tokenAfter - tokenBefore;
+                  if (tokenFillRaw <= 0n) tokenFillRaw = parseBigIntLoose(quote?.buyAmount, 0n);
+
+                  const pos = applyBuyFill(state, token, tokenFillRaw, ethSpentWei);
 
                   log('MIRROR_BUY_EXECUTED', {
                     token: lg.address,
@@ -449,6 +592,8 @@ async function run() {
                     followerTx: sent,
                     status: rec.status,
                     blockNumber: Number(rec.blockNumber),
+                    tokenFillRaw: tokenFillRaw.toString(),
+                    ethSpentWei: ethSpentWei.toString(),
                   });
 
                   state.trades.push({
@@ -459,6 +604,11 @@ async function run() {
                     watchedHash: tx.hash,
                     signalAmount: signalAmount.toString(),
                     followerTx: sent,
+                    tokenFillRaw: tokenFillRaw.toString(),
+                    ethSpentWei: ethSpentWei.toString(),
+                    qtyOpenRaw: pos.qtyOpenRaw.toString(),
+                    costOpenWei: pos.costOpenWei.toString(),
+                    realizedPnlWei: pos.realizedPnlWei.toString(),
                   });
                   persistState(STATE_FILE, state);
                 } catch (e) {
@@ -518,6 +668,12 @@ async function run() {
               }
 
               if (DRY_RUN) {
+                const estEthOutWei = parseBigIntLoose(quote?.buyAmount, 0n);
+                const pos = ensurePosition(state, token);
+                const reducibleQty = followerSellAmount > pos.qtyOpenRaw ? pos.qtyOpenRaw : followerSellAmount;
+                const estCostReducedWei = pos.qtyOpenRaw > 0n ? (pos.costOpenWei * reducibleQty) / pos.qtyOpenRaw : 0n;
+                const estRealizedPnlWei = estEthOutWei - estCostReducedWei;
+
                 log('DRY_RUN mirror sell', {
                   token: lg.address,
                   sellTokenAmount: followerSellAmount.toString(),
@@ -534,12 +690,17 @@ async function run() {
                   signalAmount: signalAmount.toString(),
                   sellTokenAmount: followerSellAmount.toString(),
                   quoteBuyAmount: quote?.buyAmount,
+                  estCostReducedWei: String(estCostReducedWei),
+                  estRealizedPnlWei: String(estRealizedPnlWei),
                 });
                 persistState(STATE_FILE, state);
                 continue;
               }
 
               try {
+                const tokenBefore = followerTokenBalance;
+                const ethBefore = await publicClient.getBalance({ address: account.address });
+
                 const spender =
                   quote?.issues?.allowance?.spender || quote?.allowanceTarget || quote?.allowanceSpender;
                 if (spender && isHexAddress(spender)) {
@@ -582,6 +743,31 @@ async function run() {
                 });
 
                 const rec = await publicClient.waitForTransactionReceipt({ hash: sent });
+                const tokenAfter = await publicClient.readContract({
+                  address: lg.address,
+                  abi: ERC20_ABI,
+                  functionName: 'balanceOf',
+                  args: [account.address],
+                });
+                const ethAfter = await publicClient.getBalance({ address: account.address });
+
+                const gasPrice = parseBigIntLoose(rec.effectiveGasPrice, 0n);
+                const gasCostWei = rec.gasUsed ? rec.gasUsed * gasPrice : 0n;
+
+                let tokenFillRaw = followerSellAmount;
+                if (tokenBefore > tokenAfter) tokenFillRaw = tokenBefore - tokenAfter;
+
+                let ethReceivedWei = parseBigIntLoose(quote?.buyAmount, 0n);
+                if (ethAfter + gasCostWei > ethBefore) {
+                  ethReceivedWei = ethAfter + gasCostWei - ethBefore;
+                }
+
+                const { pos, realizedPnlWei, costReducedWei } = applySellFill(
+                  state,
+                  token,
+                  tokenFillRaw,
+                  ethReceivedWei,
+                );
 
                 log('MIRROR_SELL_EXECUTED', {
                   token: lg.address,
@@ -589,6 +775,9 @@ async function run() {
                   followerTx: sent,
                   status: rec.status,
                   blockNumber: Number(rec.blockNumber),
+                  tokenFillRaw: tokenFillRaw.toString(),
+                  ethReceivedWei: ethReceivedWei.toString(),
+                  realizedPnlWei: realizedPnlWei.toString(),
                 });
 
                 state.trades.push({
@@ -600,6 +789,13 @@ async function run() {
                   signalAmount: signalAmount.toString(),
                   sellTokenAmount: followerSellAmount.toString(),
                   followerTx: sent,
+                  tokenFillRaw: tokenFillRaw.toString(),
+                  ethReceivedWei: ethReceivedWei.toString(),
+                  costReducedWei: costReducedWei.toString(),
+                  realizedPnlWei: realizedPnlWei.toString(),
+                  qtyOpenRaw: pos.qtyOpenRaw.toString(),
+                  costOpenWei: pos.costOpenWei.toString(),
+                  cumRealizedPnlWei: pos.realizedPnlWei.toString(),
                 });
                 persistState(STATE_FILE, state);
               } catch (e) {

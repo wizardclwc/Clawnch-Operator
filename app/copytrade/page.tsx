@@ -19,8 +19,6 @@ type ApiData = {
   bot: {
     running: boolean;
     pid: number | null;
-    logFile: string;
-    stateFile: string;
   };
   config: {
     watchAddress: string | null;
@@ -38,9 +36,23 @@ type ApiData = {
   summary: {
     totalSignals: number;
     totalExecuted: number;
+    totalRealizedPnlWei?: string;
     lastRunAt: string | null;
     lastScannedBlock: number | null;
   };
+  tokenReport?: Array<{
+    token: string;
+    boughtRaw: string;
+    soldRaw: string;
+    qtyOpenRaw: string;
+    costOpenWei: string;
+    totalBuyEthWei: string;
+    totalSellEthWei: string;
+    realizedPnlWei: string;
+    tradesBuy: number;
+    tradesSell: number;
+    lastUpdateMs: number;
+  }>;
   trades: TradeRow[];
   logTail: string[];
   updatedAt: number;
@@ -58,6 +70,29 @@ function fmtTs(ms?: number) {
     return new Date(ms).toLocaleString();
   } catch {
     return "-";
+  }
+}
+
+function fmtEthWei(v?: string | null, digits = 6) {
+  try {
+    const n = BigInt(v || "0");
+    const neg = n < 0n;
+    const abs = neg ? -n : n;
+    const base = 10n ** 18n;
+    const whole = abs / base;
+    const frac = abs % base;
+    const fracStr = frac.toString().padStart(18, "0").slice(0, digits);
+    return `${neg ? "-" : ""}${whole.toString()}.${fracStr}`;
+  } catch {
+    return "0.000000";
+  }
+}
+
+function isNonNegativeWei(v?: string | null) {
+  try {
+    return BigInt(v || "0") >= 0n;
+  } catch {
+    return true;
   }
 }
 
@@ -154,7 +189,7 @@ export default function CopytradeMonitorPage() {
 
           <section className="rounded-2xl border border-ink-700/70 bg-ink-900/60 p-4">
             <div className="text-xs uppercase tracking-wider text-white/55">Summary</div>
-            <div className="mt-3 grid grid-cols-2 gap-3">
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-3">
               <div className="rounded-xl border border-ink-700/70 bg-ink-950/30 p-3">
                 <div className="text-xs text-white/55">Signals</div>
                 <div className="mt-1 text-xl font-semibold">{data?.summary?.totalSignals ?? 0}</div>
@@ -162,6 +197,12 @@ export default function CopytradeMonitorPage() {
               <div className="rounded-xl border border-ink-700/70 bg-ink-950/30 p-3">
                 <div className="text-xs text-white/55">Executed Trades</div>
                 <div className="mt-1 text-xl font-semibold">{data?.summary?.totalExecuted ?? 0}</div>
+              </div>
+              <div className="rounded-xl border border-ink-700/70 bg-ink-950/30 p-3">
+                <div className="text-xs text-white/55">Realized PnL (ETH)</div>
+                <div className="mt-1 text-xl font-semibold">
+                  {fmtEthWei(data?.summary?.totalRealizedPnlWei || "0")}
+                </div>
               </div>
             </div>
             <div className="mt-3 text-xs text-white/55">
@@ -254,6 +295,63 @@ export default function CopytradeMonitorPage() {
                         ) : (
                           "-"
                         )}
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section className="mt-5 rounded-2xl border border-ink-700/70 bg-ink-900/60 p-4">
+          <div className="mb-3 flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-white/90">Per-Token PnL Report</h2>
+            <span className="text-xs text-white/55">{(data?.tokenReport || []).length} tokens</span>
+          </div>
+
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[980px] text-sm">
+              <thead>
+                <tr className="border-b border-ink-700/70 text-left text-white/50">
+                  <th className="py-2 pr-3">Token</th>
+                  <th className="py-2 pr-3">Buys</th>
+                  <th className="py-2 pr-3">Sells</th>
+                  <th className="py-2 pr-3">Open Qty (raw)</th>
+                  <th className="py-2 pr-3">Buy ETH</th>
+                  <th className="py-2 pr-3">Sell ETH</th>
+                  <th className="py-2 pr-3">Realized PnL (ETH)</th>
+                </tr>
+              </thead>
+              <tbody>
+                {(data?.tokenReport || []).length === 0 ? (
+                  <tr>
+                    <td className="py-4 text-white/45" colSpan={7}>
+                      No per-token report yet (new feature; data builds from new trades).
+                    </td>
+                  </tr>
+                ) : (
+                  (data?.tokenReport || []).map((r) => (
+                    <tr key={r.token} className="border-b border-ink-800/70 align-top text-white/85">
+                      <td className="py-3 pr-3">
+                        <a
+                          href={`https://basescan.org/token/${r.token}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-coral-400 hover:underline"
+                        >
+                          {short(r.token, 8, 6)}
+                        </a>
+                      </td>
+                      <td className="py-3 pr-3">{r.tradesBuy}</td>
+                      <td className="py-3 pr-3">{r.tradesSell}</td>
+                      <td className="py-3 pr-3">{r.qtyOpenRaw}</td>
+                      <td className="py-3 pr-3">{fmtEthWei(r.totalBuyEthWei)}</td>
+                      <td className="py-3 pr-3">{fmtEthWei(r.totalSellEthWei)}</td>
+                      <td className="py-3 pr-3">
+                        <span className={isNonNegativeWei(r.realizedPnlWei) ? "text-emerald-300" : "text-red-300"}>
+                          {fmtEthWei(r.realizedPnlWei)}
+                        </span>
                       </td>
                     </tr>
                   ))

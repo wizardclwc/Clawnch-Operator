@@ -6,6 +6,7 @@ A production-oriented operator console for Clawnch workflows on Base:
 - Copytrade bot controls (start/stop/restart/config save/emergency stop), with auto-buy + auto-sell mirroring
 - Fee check + claim
 - Realtime logs + executed trades
+- Per-token realized PnL report (from mirrored fills)
 
 ## Stack
 
