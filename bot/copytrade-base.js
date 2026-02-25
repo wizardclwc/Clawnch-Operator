@@ -2,7 +2,8 @@
 /*
   Copy-trade watcher for Base (RPC logs + 0x API)
   - Monitor WATCH_ADDRESS on-chain ERC20 Transfer logs
-  - If WATCH_ADDRESS receives token from a tx initiated by WATCH_ADDRESS (likely buy/swap), mirror buy via 0x
+  - Mirror BUY: target receives token -> follower buys token with ETH
+  - Mirror SELL: target sends token -> follower sells held token back to ETH
 
   IMPORTANT:
   - Default DRY_RUN=true (no real tx)
@@ -11,7 +12,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { createWalletClient, createPublicClient, http, parseEther } = require('viem');
+const { createWalletClient, createPublicClient, http, parseEther, maxUint256 } = require('viem');
 const { privateKeyToAccount } = require('viem/accounts');
 const { base } = require('viem/chains');
 
@@ -19,6 +20,36 @@ const ETH_PLACEHOLDER = '0xeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee';
 // keccak256("Transfer(address,address,uint256)")
 const TRANSFER_TOPIC = '0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef';
 const DEFAULT_STATE_FILE = path.resolve(process.cwd(), 'bot', 'copytrade-state.json');
+
+const ERC20_ABI = [
+  {
+    type: 'function',
+    name: 'balanceOf',
+    stateMutability: 'view',
+    inputs: [{ name: 'owner', type: 'address' }],
+    outputs: [{ type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'allowance',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'owner', type: 'address' },
+      { name: 'spender', type: 'address' },
+    ],
+    outputs: [{ type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'approve',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'spender', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [{ type: 'bool' }],
+  },
+];
 
 function env(name, fallback = undefined) {
   const v = process.env[name];
@@ -33,6 +64,16 @@ function toBool(v, fallback = false) {
 function toNum(v, fallback) {
   const n = Number(v);
   return Number.isFinite(n) ? n : fallback;
+}
+
+function toBigInt(v, fallback) {
+  const s = String(v ?? '').trim();
+  if (!/^[0-9]+$/.test(s)) return fallback;
+  try {
+    return BigInt(s);
+  } catch {
+    return fallback;
+  }
 }
 
 function sleep(ms) {
@@ -87,8 +128,8 @@ function buildState(stateFile) {
 
 function persistState(stateFile, state) {
   const trimmed = {
-    seen: state.seen.slice(-10000),
-    trades: state.trades.slice(-1000),
+    seen: state.seen.slice(-20000),
+    trades: state.trades.slice(-2000),
     lastRunAt: nowIso(),
     lastScannedBlock: state.lastScannedBlock,
   };
@@ -109,12 +150,12 @@ function isTradeAllowedByRate(state, { maxTradesPerHour, cooldownSec }) {
   return { ok: true };
 }
 
-async function get0xQuote({ apiKey, taker, buyToken, sellAmountWei, slippageBps }) {
+async function get0xQuote({ apiKey, taker, sellToken, buyToken, sellAmount, slippageBps }) {
   const u = new URL('https://api.0x.org/swap/allowance-holder/quote');
   u.searchParams.set('chainId', '8453');
-  u.searchParams.set('sellToken', ETH_PLACEHOLDER);
+  u.searchParams.set('sellToken', sellToken);
   u.searchParams.set('buyToken', buyToken);
-  u.searchParams.set('sellAmount', sellAmountWei);
+  u.searchParams.set('sellAmount', String(sellAmount));
   u.searchParams.set('taker', taker);
   u.searchParams.set('slippageBps', String(slippageBps));
 
@@ -139,6 +180,38 @@ async function get0xQuote({ apiKey, taker, buyToken, sellAmountWei, slippageBps 
   }
 
   return data;
+}
+
+async function ensureAllowance({ publicClient, walletClient, account, token, spender, requiredAmount }) {
+  let allowance = 0n;
+  try {
+    allowance = await publicClient.readContract({
+      address: token,
+      abi: ERC20_ABI,
+      functionName: 'allowance',
+      args: [account.address, spender],
+    });
+  } catch (e) {
+    throw new Error(`allowance read failed: ${String(e?.message || e)}`);
+  }
+
+  if (allowance >= requiredAmount) return null;
+
+  const approveTx = await walletClient.writeContract({
+    account,
+    chain: base,
+    address: token,
+    abi: ERC20_ABI,
+    functionName: 'approve',
+    args: [spender, maxUint256],
+  });
+
+  const rec = await publicClient.waitForTransactionReceipt({ hash: approveTx });
+  if (rec.status !== 'success') {
+    throw new Error(`approve failed: ${approveTx}`);
+  }
+
+  return approveTx;
 }
 
 function parsePrivateKey({ envKey, keyFile }) {
@@ -185,6 +258,11 @@ async function run() {
   const MAX_BLOCK_SCAN_PER_CYCLE = Math.max(1, toNum(env('MAX_BLOCK_SCAN_PER_CYCLE', '20'), 20));
   const STATE_FILE = env('STATE_FILE', DEFAULT_STATE_FILE);
 
+  // Auto-sell controls
+  const AUTO_SELL_ENABLED = toBool(env('AUTO_SELL_ENABLED', 'true'), true);
+  const AUTO_SELL_BPS = Math.max(1, Math.min(10000, toNum(env('AUTO_SELL_BPS', '10000'), 10000)));
+  const MIN_SELL_TOKEN_RAW = toBigInt(env('MIN_SELL_TOKEN_RAW', '1'), 1n);
+
   const IGNORE_TOKENS = String(env('IGNORE_TOKENS', ''))
     .split(',')
     .map((x) => normalizeAddr(x.trim()))
@@ -205,6 +283,8 @@ async function run() {
     dryRun: DRY_RUN,
     pollSec: POLL_SECONDS,
     tradeEth: TRADE_ETH_AMOUNT,
+    autoSellEnabled: AUTO_SELL_ENABLED,
+    autoSellBps: AUTO_SELL_BPS,
     stateFile: path.basename(STATE_FILE),
   });
 
@@ -255,43 +335,170 @@ async function run() {
               const topics = Array.isArray(lg.topics) ? lg.topics.map((t) => normalizeAddr(t)) : [];
               const hash = normalizeAddr(lg.transactionHash || tx.hash);
               const token = normalizeAddr(lg.address);
-              const logIndex = Number(lg.logIndex ?? 0);
 
               if (!hash || !token) continue;
               if (topics[0] !== normalizeAddr(TRANSFER_TOPIC)) continue;
-              if (topics[2] !== watchTopic) continue;
 
-              const dedupKey = `${hash}:${logIndex}`;
+              const isBuySignal = topics[2] === watchTopic;
+              const isSellSignal = topics[1] === watchTopic;
+
+              // Ignore self-transfer style edge cases.
+              if (isBuySignal && isSellSignal) continue;
+
+              let side = null;
+              if (isBuySignal) side = 'buy';
+              if (isSellSignal) side = 'sell';
+              if (!side) continue;
+
+              if (side === 'sell' && !AUTO_SELL_ENABLED) continue;
+
+              const dedupKey = `${hash}:${token}:${side}`;
               if (state.seen.includes(dedupKey)) continue;
               state.seen.push(dedupKey);
 
               if (IGNORE_TOKENS.includes(token)) {
-                log('skip ignored token', token, hash);
+                log('skip ignored token', token, hash, side);
                 continue;
               }
 
-              let amount = 0n;
+              let signalAmount = 0n;
               try {
-                amount = BigInt(lg.data || '0x0');
+                signalAmount = BigInt(lg.data || '0x0');
               } catch {
                 continue;
               }
-              if (amount <= 0n) continue;
+              if (signalAmount <= 0n) continue;
 
               const gate = isTradeAllowedByRate(state, {
                 maxTradesPerHour: MAX_TRADES_PER_HOUR,
                 cooldownSec: COOLDOWN_SECONDS,
               });
               if (!gate.ok) {
-                log('rate limit gate', gate.reason, 'for', token, hash);
+                log('rate limit gate', gate.reason, 'for', token, hash, side);
                 continue;
               }
 
-              const sellAmountWei = parseEther(TRADE_ETH_AMOUNT).toString();
-              log('signal detected', {
+              if (side === 'buy') {
+                const sellAmountWei = parseEther(TRADE_ETH_AMOUNT).toString();
+                log('buy signal detected', {
+                  watchedHash: tx.hash,
+                  token: lg.address,
+                  amount: signalAmount.toString(),
+                  block: b,
+                });
+
+                let quote;
+                try {
+                  quote = await get0xQuote({
+                    apiKey: OX_API_KEY,
+                    taker: account.address,
+                    sellToken: ETH_PLACEHOLDER,
+                    buyToken: lg.address,
+                    sellAmount: sellAmountWei,
+                    slippageBps: SLIPPAGE_BPS,
+                  });
+                } catch (e) {
+                  log('buy quote failed', String(e.message || e));
+                  continue;
+                }
+
+                const txTo = quote?.transaction?.to;
+                const txData = quote?.transaction?.data;
+                const txValue = quote?.transaction?.value ?? sellAmountWei;
+                if (!txTo || !txData) {
+                  log('skip invalid buy quote payload');
+                  continue;
+                }
+
+                if (DRY_RUN) {
+                  log('DRY_RUN mirror buy', {
+                    token: lg.address,
+                    sellEth: TRADE_ETH_AMOUNT,
+                    buyAmount: quote?.buyAmount,
+                    minBuyAmount: quote?.minBuyAmount,
+                    watchedHash: tx.hash,
+                  });
+
+                  state.trades.push({
+                    tsMs: Date.now(),
+                    side: 'buy',
+                    dryRun: true,
+                    token: lg.address,
+                    watchedHash: tx.hash,
+                    signalAmount: signalAmount.toString(),
+                    quoteBuyAmount: quote?.buyAmount,
+                  });
+                  persistState(STATE_FILE, state);
+                  continue;
+                }
+
+                try {
+                  const sent = await walletClient.sendTransaction({
+                    account,
+                    chain: base,
+                    to: txTo,
+                    data: txData,
+                    value: BigInt(String(txValue)),
+                  });
+
+                  const rec = await publicClient.waitForTransactionReceipt({ hash: sent });
+
+                  log('MIRROR_BUY_EXECUTED', {
+                    token: lg.address,
+                    watchedHash: tx.hash,
+                    followerTx: sent,
+                    status: rec.status,
+                    blockNumber: Number(rec.blockNumber),
+                  });
+
+                  state.trades.push({
+                    tsMs: Date.now(),
+                    side: 'buy',
+                    dryRun: false,
+                    token: lg.address,
+                    watchedHash: tx.hash,
+                    signalAmount: signalAmount.toString(),
+                    followerTx: sent,
+                  });
+                  persistState(STATE_FILE, state);
+                } catch (e) {
+                  log('buy send tx failed', String(e.message || e));
+                }
+
+                continue;
+              }
+
+              // side === 'sell'
+              let followerTokenBalance = 0n;
+              try {
+                followerTokenBalance = await publicClient.readContract({
+                  address: lg.address,
+                  abi: ERC20_ABI,
+                  functionName: 'balanceOf',
+                  args: [account.address],
+                });
+              } catch (e) {
+                log('sell balance read failed', token, String(e.message || e));
+                continue;
+              }
+
+              if (followerTokenBalance <= 0n) {
+                log('sell signal skip (no follower balance)', token, tx.hash);
+                continue;
+              }
+
+              const followerSellAmount = (followerTokenBalance * BigInt(AUTO_SELL_BPS)) / 10000n;
+              if (followerSellAmount < MIN_SELL_TOKEN_RAW) {
+                log('sell signal skip (below min raw)', token, followerSellAmount.toString());
+                continue;
+              }
+
+              log('sell signal detected', {
                 watchedHash: tx.hash,
                 token: lg.address,
-                amount: amount.toString(),
+                amountOutFromWatch: signalAmount.toString(),
+                followerBalance: followerTokenBalance.toString(),
+                followerSellAmount: followerSellAmount.toString(),
                 block: b,
               });
 
@@ -300,37 +507,32 @@ async function run() {
                 quote = await get0xQuote({
                   apiKey: OX_API_KEY,
                   taker: account.address,
-                  buyToken: lg.address,
-                  sellAmountWei,
+                  sellToken: lg.address,
+                  buyToken: ETH_PLACEHOLDER,
+                  sellAmount: followerSellAmount.toString(),
                   slippageBps: SLIPPAGE_BPS,
                 });
               } catch (e) {
-                log('quote failed', String(e.message || e));
-                continue;
-              }
-
-              const txTo = quote?.transaction?.to;
-              const txData = quote?.transaction?.data;
-              const txValue = quote?.transaction?.value ?? sellAmountWei;
-              if (!txTo || !txData) {
-                log('skip invalid quote payload');
+                log('sell quote failed', String(e.message || e));
                 continue;
               }
 
               if (DRY_RUN) {
-                log('DRY_RUN mirror buy', {
+                log('DRY_RUN mirror sell', {
                   token: lg.address,
-                  sellEth: TRADE_ETH_AMOUNT,
-                  buyAmount: quote?.buyAmount,
-                  minBuyAmount: quote?.minBuyAmount,
+                  sellTokenAmount: followerSellAmount.toString(),
+                  expectedEthOutWei: quote?.buyAmount,
                   watchedHash: tx.hash,
                 });
 
                 state.trades.push({
                   tsMs: Date.now(),
+                  side: 'sell',
                   dryRun: true,
                   token: lg.address,
                   watchedHash: tx.hash,
+                  signalAmount: signalAmount.toString(),
+                  sellTokenAmount: followerSellAmount.toString(),
                   quoteBuyAmount: quote?.buyAmount,
                 });
                 persistState(STATE_FILE, state);
@@ -338,6 +540,39 @@ async function run() {
               }
 
               try {
+                const spender =
+                  quote?.issues?.allowance?.spender || quote?.allowanceTarget || quote?.allowanceSpender;
+                if (spender && isHexAddress(spender)) {
+                  const approveTx = await ensureAllowance({
+                    publicClient,
+                    walletClient,
+                    account,
+                    token: lg.address,
+                    spender,
+                    requiredAmount: followerSellAmount,
+                  });
+                  if (approveTx) {
+                    log('sell approve ok', { token: lg.address, spender, approveTx });
+                    // Refresh quote after approval to avoid stale payload.
+                    quote = await get0xQuote({
+                      apiKey: OX_API_KEY,
+                      taker: account.address,
+                      sellToken: lg.address,
+                      buyToken: ETH_PLACEHOLDER,
+                      sellAmount: followerSellAmount.toString(),
+                      slippageBps: SLIPPAGE_BPS,
+                    });
+                  }
+                }
+
+                const txTo = quote?.transaction?.to;
+                const txData = quote?.transaction?.data;
+                const txValue = quote?.transaction?.value ?? '0';
+                if (!txTo || !txData) {
+                  log('skip invalid sell quote payload');
+                  continue;
+                }
+
                 const sent = await walletClient.sendTransaction({
                   account,
                   chain: base,
@@ -348,7 +583,7 @@ async function run() {
 
                 const rec = await publicClient.waitForTransactionReceipt({ hash: sent });
 
-                log('MIRROR_BUY_EXECUTED', {
+                log('MIRROR_SELL_EXECUTED', {
                   token: lg.address,
                   watchedHash: tx.hash,
                   followerTx: sent,
@@ -358,14 +593,17 @@ async function run() {
 
                 state.trades.push({
                   tsMs: Date.now(),
+                  side: 'sell',
                   dryRun: false,
                   token: lg.address,
                   watchedHash: tx.hash,
+                  signalAmount: signalAmount.toString(),
+                  sellTokenAmount: followerSellAmount.toString(),
                   followerTx: sent,
                 });
                 persistState(STATE_FILE, state);
               } catch (e) {
-                log('send tx failed', String(e.message || e));
+                log('sell send tx failed', String(e.message || e));
               }
             }
           }

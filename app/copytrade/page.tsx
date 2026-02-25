@@ -9,6 +9,9 @@ type TradeRow = {
   watchedHash?: string;
   followerTx?: string;
   quoteBuyAmount?: string;
+  side?: "buy" | "sell";
+  signalAmount?: string;
+  sellTokenAmount?: string;
 };
 
 type ApiData = {
@@ -28,7 +31,9 @@ type ApiData = {
     cooldownSeconds: string | null;
     maxTradesPerHour: string | null;
     startLookbackBlocks: string | null;
-    stateFile: string | null;
+    autoSellEnabled: string | null;
+    autoSellBps: string | null;
+    minSellTokenRaw: string | null;
   };
   summary: {
     totalSignals: number;
@@ -97,7 +102,7 @@ export default function CopytradeMonitorPage() {
         <div className="mb-5 flex flex-wrap items-center justify-between gap-3">
           <div>
             <h1 className="text-2xl font-semibold text-white">CopyTrade Realtime Monitor</h1>
-            <p className="mt-1 text-sm text-white/60">Pantau sinyal + eksekusi buy bot secara realtime.</p>
+            <p className="mt-1 text-sm text-white/60">Track live signals and mirrored buy/sell executions.</p>
           </div>
 
           <div className="flex items-center gap-2">
@@ -141,6 +146,8 @@ export default function CopytradeMonitorPage() {
               <div>Watch: {short(data?.config?.watchAddress, 8, 6)}</div>
               <div>Trade size: {data?.config?.tradeEthAmount ?? "-"} ETH</div>
               <div>Dry run: {String(data?.config?.dryRun ?? "-")}</div>
+              <div>Auto-sell: {String(data?.config?.autoSellEnabled ?? "-")}</div>
+              <div>Auto-sell BPS: {data?.config?.autoSellBps ?? "-"}</div>
               <div>Poll: {data?.config?.pollSeconds ?? "-"}s</div>
             </div>
           </section>
@@ -153,7 +160,7 @@ export default function CopytradeMonitorPage() {
                 <div className="mt-1 text-xl font-semibold">{data?.summary?.totalSignals ?? 0}</div>
               </div>
               <div className="rounded-xl border border-ink-700/70 bg-ink-950/30 p-3">
-                <div className="text-xs text-white/55">Executed Buys</div>
+                <div className="text-xs text-white/55">Executed Trades</div>
                 <div className="mt-1 text-xl font-semibold">{data?.summary?.totalExecuted ?? 0}</div>
               </div>
             </div>
@@ -170,14 +177,14 @@ export default function CopytradeMonitorPage() {
               Updated: {data?.updatedAt ? new Date(data.updatedAt).toLocaleTimeString() : "-"}
             </div>
             <div className="mt-4 text-xs text-white/55">
-              This page auto-refreshes every 3 seconds to show newly executed buys.
+              This page auto-refreshes every 3 seconds to show newly executed buy/sell trades.
             </div>
           </section>
         </div>
 
         <section className="mt-5 rounded-2xl border border-ink-700/70 bg-ink-900/60 p-4">
           <div className="mb-3 flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-white/90">Executed Buys</h2>
+            <h2 className="text-sm font-semibold text-white/90">Executed Trades</h2>
             <span className="text-xs text-white/55">{executed.length} rows</span>
           </div>
 
@@ -186,6 +193,7 @@ export default function CopytradeMonitorPage() {
               <thead>
                 <tr className="border-b border-ink-700/70 text-left text-white/50">
                   <th className="py-2 pr-3">Time</th>
+                  <th className="py-2 pr-3">Side</th>
                   <th className="py-2 pr-3">Token</th>
                   <th className="py-2 pr-3">Watched Tx</th>
                   <th className="py-2 pr-3">Follower Tx</th>
@@ -194,14 +202,21 @@ export default function CopytradeMonitorPage() {
               <tbody>
                 {executed.length === 0 ? (
                   <tr>
-                    <td className="py-4 text-white/45" colSpan={4}>
-                      No executed buys yet.
+                    <td className="py-4 text-white/45" colSpan={5}>
+                      No executed trades yet.
                     </td>
                   </tr>
                 ) : (
                   executed.map((t, i) => (
                     <tr key={`${t.followerTx}-${i}`} className="border-b border-ink-800/70 align-top text-white/85">
                       <td className="py-3 pr-3">{fmtTs(t.tsMs)}</td>
+                      <td className="py-3 pr-3">
+                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${
+                          t.side === "sell" ? "bg-amber-500/15 text-amber-300" : "bg-emerald-500/15 text-emerald-300"
+                        }`}>
+                          {(t.side || "buy").toUpperCase()}
+                        </span>
+                      </td>
                       <td className="py-3 pr-3">
                         <a
                           href={`https://basescan.org/token/${t.token}`}

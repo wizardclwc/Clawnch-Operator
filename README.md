@@ -3,7 +3,7 @@
 A production-oriented operator console for Clawnch workflows on Base:
 
 - Token launch (via `@clawnch/clawncher-sdk`)
-- Copytrade bot controls (start/stop/restart/config save/emergency stop)
+- Copytrade bot controls (start/stop/restart/config save/emergency stop), with auto-buy + auto-sell mirroring
 - Fee check + claim
 - Realtime logs + executed trades
 
@@ -49,6 +49,15 @@ If `OPERATOR_API_TOKEN` is empty, auth guard is disabled (useful for internal de
 ## Copytrade runtime notes
 
 The copytrade bot runs as a separate Node process (`bot/copytrade-base.js`).
+It supports:
+- Auto-buy mirror (target wallet buys token)
+- Auto-sell mirror (target wallet sells token)
+
+Auto-sell behavior is configurable via `.env.copytrade`:
+- `AUTO_SELL_ENABLED=true|false`
+- `AUTO_SELL_BPS` (default `10000` = sell 100% of follower token balance on signal)
+- `MIN_SELL_TOKEN_RAW` (dust guard)
+
 Control endpoints:
 
 - `GET /api/operator/copytrade/control` (status)

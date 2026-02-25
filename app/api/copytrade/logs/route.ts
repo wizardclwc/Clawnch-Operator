@@ -64,6 +64,9 @@ function parseEnvView() {
     cooldownSeconds: out.COOLDOWN_SECONDS || null,
     maxTradesPerHour: out.MAX_TRADES_PER_HOUR || null,
     startLookbackBlocks: out.START_LOOKBACK_BLOCKS || null,
+    autoSellEnabled: out.AUTO_SELL_ENABLED || null,
+    autoSellBps: out.AUTO_SELL_BPS || null,
+    minSellTokenRaw: out.MIN_SELL_TOKEN_RAW || null,
   };
 }
 
@@ -76,6 +79,9 @@ type CopytradeState = {
     watchedHash?: string;
     followerTx?: string;
     quoteBuyAmount?: string;
+    side?: "buy" | "sell";
+    signalAmount?: string;
+    sellTokenAmount?: string;
   }>;
   lastRunAt?: string;
   lastScannedBlock?: number;

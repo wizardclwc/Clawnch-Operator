@@ -24,6 +24,9 @@ export type CopytradeConfig = {
   START_LOOKBACK_BLOCKS: string;
   MAX_BLOCK_SCAN_PER_CYCLE: string;
   IGNORE_TOKENS: string;
+  AUTO_SELL_ENABLED: string;
+  AUTO_SELL_BPS: string;
+  MIN_SELL_TOKEN_RAW: string;
   STATE_FILE: string;
 };
 
@@ -42,6 +45,9 @@ const DEFAULTS: CopytradeConfig = {
   START_LOOKBACK_BLOCKS: "8",
   MAX_BLOCK_SCAN_PER_CYCLE: "20",
   IGNORE_TOKENS: "",
+  AUTO_SELL_ENABLED: "true",
+  AUTO_SELL_BPS: "10000",
+  MIN_SELL_TOKEN_RAW: "1",
   STATE_FILE,
 };
 
@@ -192,6 +198,9 @@ export function getCopytradeRuntimeStatus() {
       START_LOOKBACK_BLOCKS: config.START_LOOKBACK_BLOCKS,
       MAX_BLOCK_SCAN_PER_CYCLE: config.MAX_BLOCK_SCAN_PER_CYCLE,
       IGNORE_TOKENS: config.IGNORE_TOKENS,
+      AUTO_SELL_ENABLED: config.AUTO_SELL_ENABLED,
+      AUTO_SELL_BPS: config.AUTO_SELL_BPS,
+      MIN_SELL_TOKEN_RAW: config.MIN_SELL_TOKEN_RAW,
       OX_API_KEY_SET: config.OX_API_KEY ? "yes" : "no",
       FOLLOWER_PRIVATE_KEY_SET: config.FOLLOWER_PRIVATE_KEY ? "yes" : "no",
       FOLLOWER_PRIVATE_KEY_FILE_SET: config.FOLLOWER_PRIVATE_KEY_FILE ? "yes" : "no",

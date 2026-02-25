@@ -27,6 +27,7 @@ type LogsPayload = {
   };
   trades: Array<{
     tsMs?: number;
+    side?: "buy" | "sell";
     dryRun?: boolean;
     token?: string;
     watchedHash?: string;
@@ -80,6 +81,9 @@ export default function OperatorPage() {
   const [startLookbackBlocks, setStartLookbackBlocks] = useState("8");
   const [maxBlockScanPerCycle, setMaxBlockScanPerCycle] = useState("20");
   const [ignoreTokens, setIgnoreTokens] = useState("");
+  const [autoSellEnabled, setAutoSellEnabled] = useState(true);
+  const [autoSellBps, setAutoSellBps] = useState("10000");
+  const [minSellTokenRaw, setMinSellTokenRaw] = useState("1");
 
   const authHeaders = useMemo(() => {
     const h: Record<string, string> = { "content-type": "application/json" };
@@ -112,6 +116,9 @@ export default function OperatorPage() {
         setStartLookbackBlocks(cfg.START_LOOKBACK_BLOCKS || "8");
         setMaxBlockScanPerCycle(cfg.MAX_BLOCK_SCAN_PER_CYCLE || "20");
         setIgnoreTokens(cfg.IGNORE_TOKENS || "");
+        setAutoSellEnabled(toBool(cfg.AUTO_SELL_ENABLED || "true"));
+        setAutoSellBps(cfg.AUTO_SELL_BPS || "10000");
+        setMinSellTokenRaw(cfg.MIN_SELL_TOKEN_RAW || "1");
       }
 
       if (lRes.ok && lJson?.ok) {
@@ -169,6 +176,9 @@ export default function OperatorPage() {
       startLookbackBlocks,
       maxBlockScanPerCycle,
       ignoreTokens,
+      autoSellEnabled: autoSellEnabled ? "true" : "false",
+      autoSellBps,
+      minSellTokenRaw,
     });
   };
 
@@ -319,7 +329,7 @@ export default function OperatorPage() {
 
         <section className="mt-5 rounded-2xl border border-ink-700/70 bg-ink-900/60 p-4">
           <h2 className="text-sm font-semibold text-white/90">3) Copytrade Panel + 5) Emergency Stop</h2>
-          <p className="mt-1 text-xs text-white/55">Watch target wallet → auto buy. Control start/stop from here.</p>
+          <p className="mt-1 text-xs text-white/55">Watch target wallet → auto buy/sell mirror. Control start/stop from here.</p>
 
           <div className="mt-3 grid grid-cols-1 gap-3 md:grid-cols-3">
             <input value={watchAddress} onChange={(e) => setWatchAddress(e.target.value.trim())} placeholder="Watch address" className="h-10 rounded-lg border border-ink-700/70 bg-black/20 px-3 text-sm" />
@@ -331,14 +341,22 @@ export default function OperatorPage() {
             <input value={maxTradesPerHour} onChange={(e) => setMaxTradesPerHour(e.target.value)} placeholder="Max trades/hour" className="h-10 rounded-lg border border-ink-700/70 bg-black/20 px-3 text-sm" />
             <input value={startLookbackBlocks} onChange={(e) => setStartLookbackBlocks(e.target.value)} placeholder="Start lookback blocks" className="h-10 rounded-lg border border-ink-700/70 bg-black/20 px-3 text-sm" />
             <input value={maxBlockScanPerCycle} onChange={(e) => setMaxBlockScanPerCycle(e.target.value)} placeholder="Max block scan/cycle" className="h-10 rounded-lg border border-ink-700/70 bg-black/20 px-3 text-sm" />
+            <input value={autoSellBps} onChange={(e) => setAutoSellBps(e.target.value)} placeholder="Auto-sell BPS (10000=100%)" className="h-10 rounded-lg border border-ink-700/70 bg-black/20 px-3 text-sm" />
+            <input value={minSellTokenRaw} onChange={(e) => setMinSellTokenRaw(e.target.value)} placeholder="Min sell token raw" className="h-10 rounded-lg border border-ink-700/70 bg-black/20 px-3 text-sm" />
           </div>
 
           <input value={ignoreTokens} onChange={(e) => setIgnoreTokens(e.target.value)} placeholder="Ignore token addresses (comma-separated)" className="mt-3 h-10 w-full rounded-lg border border-ink-700/70 bg-black/20 px-3 text-sm" />
 
-          <label className="mt-3 inline-flex items-center gap-2 text-sm text-white/80">
-            <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
-            Dry run
-          </label>
+          <div className="mt-3 flex flex-wrap items-center gap-4 text-sm text-white/80">
+            <label className="inline-flex items-center gap-2">
+              <input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} />
+              Dry run
+            </label>
+            <label className="inline-flex items-center gap-2">
+              <input type="checkbox" checked={autoSellEnabled} onChange={(e) => setAutoSellEnabled(e.target.checked)} />
+              Auto-sell when target sells
+            </label>
+          </div>
 
           <div className="mt-3 flex flex-wrap gap-2">
             <button onClick={() => void saveConfig()} disabled={ctrlBusy} className="h-10 rounded-lg border border-ink-700/70 bg-white/5 px-3 text-sm">Save Config</button>
@@ -349,7 +367,7 @@ export default function OperatorPage() {
           </div>
 
           <div className="mt-3 rounded-lg border border-ink-700/70 bg-black/20 p-3 text-xs text-white/70">
-            Status: {status?.running ? "RUNNING" : "STOPPED"} • PID: {status?.pid ?? "-"} • Signals: {status?.summary?.totalSignals ?? 0} • Last block: {status?.summary?.lastScannedBlock ?? "-"}
+            Status: {status?.running ? "RUNNING" : "STOPPED"} • PID: {status?.pid ?? "-"} • Signals: {status?.summary?.totalSignals ?? 0} • Last block: {status?.summary?.lastScannedBlock ?? "-"} • Auto-sell: {autoSellEnabled ? "ON" : "OFF"}
           </div>
         </section>
 
@@ -361,6 +379,7 @@ export default function OperatorPage() {
               <thead className="bg-black/20 text-left text-white/55">
                 <tr>
                   <th className="px-3 py-2">Time</th>
+                  <th className="px-3 py-2">Side</th>
                   <th className="px-3 py-2">Token</th>
                   <th className="px-3 py-2">Watched Tx</th>
                   <th className="px-3 py-2">Follower Tx</th>
@@ -369,14 +388,21 @@ export default function OperatorPage() {
               <tbody>
                 {executedRows.length === 0 ? (
                   <tr>
-                    <td colSpan={4} className="px-3 py-3 text-white/50">
-                      No executed buys yet.
+                    <td colSpan={5} className="px-3 py-3 text-white/50">
+                      No executed trades yet.
                     </td>
                   </tr>
                 ) : (
                   executedRows.map((r, i) => (
                     <tr key={`${r.followerTx}-${i}`} className="border-t border-ink-800/70">
                       <td className="px-3 py-2 text-white/80">{r.tsMs ? new Date(r.tsMs).toLocaleString() : "-"}</td>
+                      <td className="px-3 py-2">
+                        <span className={`inline-flex rounded-full px-2 py-1 text-xs font-semibold ${
+                          r.side === "sell" ? "bg-amber-500/15 text-amber-300" : "bg-emerald-500/15 text-emerald-300"
+                        }`}>
+                          {(r.side || "buy").toUpperCase()}
+                        </span>
+                      </td>
                       <td className="px-3 py-2"><a className="text-coral-300 hover:underline" href={`https://basescan.org/token/${r.token}`} target="_blank" rel="noreferrer">{short(r.token, 8, 6)}</a></td>
                       <td className="px-3 py-2"><a className="text-coral-300 hover:underline" href={`https://basescan.org/tx/${r.watchedHash}`} target="_blank" rel="noreferrer">{short(r.watchedHash, 8, 6)}</a></td>
                       <td className="px-3 py-2"><a className="text-emerald-300 hover:underline" href={`https://basescan.org/tx/${r.followerTx}`} target="_blank" rel="noreferrer">{short(r.followerTx, 8, 6)}</a></td>

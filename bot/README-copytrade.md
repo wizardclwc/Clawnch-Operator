@@ -1,6 +1,6 @@
 # Base CopyTrade Bot (0x API)
 
-This bot watches a target wallet on Base (directly from RPC/block receipts), then mirrors token buys using the 0x API.
+This bot watches a target wallet on Base (directly from RPC/block receipts), then mirrors token buys and sells using the 0x API.
 
 Default target:
 - `0x2ACaC49b7920D80C3C329E30ca93D0C4b4849eC6`
@@ -12,8 +12,13 @@ Default target:
    - the target wallet receives tokens,
    - the hash belongs to a transaction sent by the watched wallet (`tx.from == WATCH_ADDRESS`),
    - the transaction status is successful.
-3. Request a `buy token with ETH` quote from 0x.
-4. Execute on follower wallet (or log-only when `DRY_RUN=true`).
+3. Treat a transaction as a sell signal when:
+   - the target wallet sends tokens out,
+   - the hash belongs to a transaction sent by the watched wallet,
+   - the transaction status is successful.
+4. On buy signal: request `buy token with ETH` quote from 0x and mirror buy.
+5. On sell signal: sell follower-held token back to ETH (configurable bps), with approval handling.
+6. Execute on follower wallet (or log-only when `DRY_RUN=true`).
 
 ## Setup
 
@@ -47,7 +52,8 @@ pm2 save
 - `COOLDOWN_SECONDS`
 - `MAX_TRADES_PER_HOUR`
 - `IGNORE_TOKENS`
-- hash+token deduplication (state file)
+- `AUTO_SELL_ENABLED`, `AUTO_SELL_BPS`, `MIN_SELL_TOKEN_RAW`
+- hash+token+side deduplication (state file)
 
 ## Important notes
 

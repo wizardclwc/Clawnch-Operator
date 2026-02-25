@@ -62,6 +62,9 @@ export async function POST(req: NextRequest) {
         START_LOOKBACK_BLOCKS: toStr(body?.config?.startLookbackBlocks),
         MAX_BLOCK_SCAN_PER_CYCLE: toStr(body?.config?.maxBlockScanPerCycle),
         IGNORE_TOKENS: toStr(body?.config?.ignoreTokens),
+        AUTO_SELL_ENABLED: toStr(body?.config?.autoSellEnabled),
+        AUTO_SELL_BPS: toStr(body?.config?.autoSellBps),
+        MIN_SELL_TOKEN_RAW: toStr(body?.config?.minSellTokenRaw),
         STATE_FILE: toStr(body?.config?.stateFile),
       });
 
